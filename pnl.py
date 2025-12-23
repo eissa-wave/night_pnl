@@ -21,18 +21,12 @@ from google.oauth2.service_account import Credentials
 # =========================
 def require_env(name: str) -> str:
     val = os.getenv(name)
-    if not val:
+    if val is None or str(val).strip() == "":
         raise RuntimeError(f"Missing required env var: {name}")
     return val
 
 
-# Exchange keys (set in GitHub Actions/Jenkins/AWS env)
-BYBIT_API_KEY = require_env("BYBIT_API_KEY")
-BYBIT_API_SECRET = require_env("BYBIT_API_SECRET")
-BINANCE_API_KEY = require_env("BINANCE_API_KEY")
-BINANCE_API_SECRET = require_env("BINANCE_API_SECRET")
-
-# Google Sheets config
+# Google Sheets config (SHEET_URL from env, TAB_NAME hardcoded to avoid env spacing issues)
 SHEET_URL = require_env("SHEET_URL")
 TAB_NAME = "CeFi Data"
 
@@ -41,26 +35,28 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+
 # Google service account:
 # - Prefer GOOGLE_SERVICE_ACCOUNT_FILE (path to JSON file)
 # - Or provide GOOGLE_SERVICE_ACCOUNT_JSON (full JSON string) and we'll write a temp file
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-
-
 def get_service_account_file_path() -> str:
-    if GOOGLE_SERVICE_ACCOUNT_FILE:
-        return GOOGLE_SERVICE_ACCOUNT_FILE
+    # Read from env at call time (important for cron/sourcing)
+    google_service_account_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+    google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
+    if google_service_account_file and google_service_account_file.strip():
+        return google_service_account_file.strip()
+
+    if google_service_account_json and google_service_account_json.strip():
+        # Must be valid JSON content (not a filepath)
         try:
-            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+            json.loads(google_service_account_json)
         except json.JSONDecodeError as e:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON") from e
 
         fd, path = tempfile.mkstemp(prefix="gcp-sa-", suffix=".json")
         with os.fdopen(fd, "w") as f:
-            f.write(GOOGLE_SERVICE_ACCOUNT_JSON)
+            f.write(google_service_account_json)
         return path
 
     raise RuntimeError(
@@ -239,6 +235,12 @@ def binance_get_futures_account(
 # MAIN
 # =========================
 if __name__ == "__main__":
+    # Read exchange env vars at runtime (important for cron/sourcing)
+    BYBIT_API_KEY = require_env("BYBIT_API_KEY")
+    BYBIT_API_SECRET = require_env("BYBIT_API_SECRET")
+    BINANCE_API_KEY = require_env("BINANCE_API_KEY")
+    BINANCE_API_SECRET = require_env("BINANCE_API_SECRET")
+
     # ---- BYBIT ----
     bybit_resp = bybit_get_positions(
         api_key=BYBIT_API_KEY,
@@ -281,9 +283,6 @@ if __name__ == "__main__":
     binance_size = None
     if positions:
         binance_size = positions[0].get("positionAmt")
-
-    # This line in your sample code didn't print; leaving behavior the same:
-    positions[0]["positionAmt"] if positions else None
 
     # ---- BUILD DATAFRAME FOR SHEET (cefi pnl) ----
     now_ms = int(time.time() * 1000)

@@ -17,6 +17,26 @@ from google.oauth2.service_account import Credentials
 
 
 # =========================
+# DEBUG HELPERS
+# =========================
+DEBUG = os.getenv("DEBUG", "").strip() in ("1", "true", "True", "yes", "YES")
+
+
+def _dbg(msg: str) -> None:
+    if DEBUG:
+        print(f"[DBG] {msg}", flush=True)
+
+
+def _dbg_env(name: str) -> None:
+    """Prints presence/length only (won't dump secrets)."""
+    v = os.getenv(name)
+    if v is None:
+        _dbg(f"{name}: <missing>")
+    else:
+        _dbg(f"{name}: len={len(v)} leading={repr(v[:4])} trailing={repr(v[-4:])}")
+
+
+# =========================
 # CONFIG / SECRETS (ENV)
 # =========================
 def require_env(name: str) -> str:
@@ -121,8 +141,34 @@ def bybit_get_positions(
 
     url = f"{BYBIT_BASE_URL}/v5/position/list"
     resp = requests.get(url, params=params, headers=headers, timeout=timeout_s)
+
+    _dbg(f"BYBIT URL: {url}")
+    _dbg(f"BYBIT params: {params}")
+    _dbg(f"BYBIT status_code: {resp.status_code}")
+    _dbg(f"BYBIT raw text (first 300): {resp.text[:300]}")
+
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+
+    _dbg(f"BYBIT retCode: {data.get('retCode')} retMsg: {data.get('retMsg')}")
+    lst = data.get("result", {}).get("list", [])
+    _dbg(f"BYBIT list_len: {len(lst)}")
+
+    if lst:
+        sample = [
+            {
+                "symbol": p.get("symbol"),
+                "category": p.get("category"),
+                "side": p.get("side"),
+                "size": p.get("size"),
+                "positionIdx": p.get("positionIdx"),
+                "settleCoin": p.get("settleCoin"),
+            }
+            for p in lst[:5]
+        ]
+        _dbg(f"BYBIT sample_positions: {sample}")
+
+    return data
 
 
 # =========================
@@ -241,6 +287,20 @@ if __name__ == "__main__":
     BINANCE_API_KEY = require_env("BINANCE_API_KEY")
     BINANCE_API_SECRET = require_env("BINANCE_API_SECRET")
 
+    # env diagnostics (won't print secrets)
+    _dbg_env("BYBIT_API_KEY")
+    _dbg_env("BYBIT_API_SECRET")
+    _dbg_env("BINANCE_API_KEY")
+    _dbg_env("BINANCE_API_SECRET")
+    _dbg_env("GOOGLE_SERVICE_ACCOUNT_FILE")
+    _dbg_env("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    # hard fail if whitespace sneaks in (common with copy/paste or CRLF)
+    if BYBIT_API_KEY != BYBIT_API_KEY.strip() or BYBIT_API_SECRET != BYBIT_API_SECRET.strip():
+        raise RuntimeError("BYBIT key/secret contain leading/trailing whitespace. Fix ~/.cefi_env.")
+    if BINANCE_API_KEY != BINANCE_API_KEY.strip() or BINANCE_API_SECRET != BINANCE_API_SECRET.strip():
+        raise RuntimeError("BINANCE key/secret contain leading/trailing whitespace. Fix ~/.cefi_env.")
+
     # ---- BYBIT ----
     bybit_resp = bybit_get_positions(
         api_key=BYBIT_API_KEY,
@@ -250,11 +310,21 @@ if __name__ == "__main__":
     )
 
     bybit_list = bybit_resp.get("result", {}).get("list", [])
+
+    # Select the NIGHT position explicitly (do NOT assume list[0] is NIGHT)
+    night_pos = next((p for p in bybit_list if p.get("symbol") == "NIGHTUSDT"), None)
+
     bybit_cum_realised_pnl = None
     bybit_size = None
-    if bybit_list:
-        bybit_cum_realised_pnl = bybit_list[0].get("cumRealisedPnl")
-        bybit_size = bybit_list[0].get("size")
+    bybit_status = "OK"
+
+    if night_pos:
+        bybit_cum_realised_pnl = night_pos.get("cumRealisedPnl")
+        bybit_size = night_pos.get("size")
+    else:
+        # Make the failure mode visible in the sheet
+        bybit_status = f"NOT_FOUND (list_len={len(bybit_list)})"
+        _dbg(f"BYBIT NIGHT position not found. list_len={len(bybit_list)}")
 
     # ---- BINANCE ----
     income = binance_get_futures_income(
@@ -282,6 +352,7 @@ if __name__ == "__main__":
 
     binance_size = None
     if positions:
+        # If you want specifically NIGHTUSDT here too, we can filter by symbol.
         binance_size = positions[0].get("positionAmt")
 
     # ---- BUILD DATAFRAME FOR SHEET (cefi pnl) ----
@@ -301,6 +372,13 @@ if __name__ == "__main__":
                 "symbol": "NIGHTUSDT",
                 "metric": "size",
                 "value": bybit_size,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "bybit",
+                "symbol": "NIGHTUSDT",
+                "metric": "status",
+                "value": bybit_status,
             },
             {
                 "timestamp_ms": now_ms,
@@ -348,7 +426,7 @@ if __name__ == "__main__":
         ws = sh.add_worksheet(
             title=TAB_NAME,
             rows=max(len(df) + 10, 1000),
-            cols=len(df.columns) + 5,
+            cols=max(len(df.columns) + 5, 10),
         )
 
     ws.clear()

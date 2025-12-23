@@ -34,7 +34,7 @@ BINANCE_API_SECRET = require_env("BINANCE_API_SECRET")
 
 # Google Sheets config
 SHEET_URL = require_env("SHEET_URL")
-TAB_NAME = os.getenv("TAB_NAME", "cefi data")
+TAB_NAME = "CeFi Data"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",

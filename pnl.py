@@ -4,6 +4,7 @@ import tempfile
 import time
 import hmac
 import hashlib
+import base64
 from urllib.parse import urlencode
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
@@ -232,6 +233,95 @@ def binance_get_futures_account(
 
 
 # =========================
+# OKX CONFIG
+# =========================
+OKX_BASE_URL = "https://www.okx.com"
+
+
+def _okx_timestamp() -> str:
+    # Millisecond ISO format, e.g. 2020-12-08T09:08:57.715Z
+    now = datetime.now(timezone.utc)
+    return now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _okx_sign(timestamp: str, method: str, request_path: str, body: str, secret: str) -> str:
+    prehash = f"{timestamp}{method.upper()}{request_path}{body}"
+    digest = hmac.new(secret.encode("utf-8"), prehash.encode("utf-8"), hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("utf-8")
+
+
+def okx_get_positions(
+    api_key: str,
+    api_secret: str,
+    passphrase: str,
+    inst_type: Optional[str] = None,   # "SWAP", "FUTURES", "MARGIN", "OPTION"
+    inst_id: Optional[str] = None,     # e.g. "BTC-USDT-SWAP"
+    pos_id: Optional[str] = None,      # optional
+    timeout_s: int = 20,
+) -> Dict[str, Any]:
+    """
+    Calls: GET /api/v5/account/positions
+    Returns: {"code":"0","msg":"","data":[ ... ]}
+    """
+    path = "/api/v5/account/positions"
+
+    params: Dict[str, str] = {}
+    if inst_type:
+        params["instType"] = inst_type
+    if inst_id:
+        params["instId"] = inst_id
+    if pos_id:
+        params["posId"] = pos_id
+
+    query = urlencode(params)
+    request_path = f"{path}?{query}" if query else path
+
+    timestamp = _okx_timestamp()
+    method = "GET"
+    body = ""  # GET has no body
+
+    sign = _okx_sign(timestamp, method, request_path, body, api_secret)
+
+    headers = {
+        "OK-ACCESS-KEY": api_key,
+        "OK-ACCESS-SIGN": sign,
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-PASSPHRASE": passphrase,
+        "Content-Type": "application/json",
+    }
+
+    url = f"{OKX_BASE_URL}{request_path}"
+    r = requests.get(url, headers=headers, timeout=timeout_s)
+
+    try:
+        data = r.json()
+    except ValueError:
+        r.raise_for_status()
+        raise RuntimeError(f"Non-JSON response: {r.text}")
+
+    if r.status_code != 200:
+        raise RuntimeError(f"OKX HTTP error ({r.status_code}): {data}")
+
+    # OKX uses code != "0" to indicate API-level errors even with HTTP 200
+    if isinstance(data, dict) and data.get("code") not in (None, "0"):
+        raise RuntimeError(f"OKX API error: {data}")
+
+    return data
+
+
+def _pick_okx_position(resp: Dict[str, Any], inst_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    data = resp.get("data", [])
+    if not isinstance(data, list) or not data:
+        return None
+    if not inst_id:
+        return data[0]
+    for p in data:
+        if p.get("instId") == inst_id:
+            return p
+    return data[0]
+
+
+# =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
@@ -240,6 +330,14 @@ if __name__ == "__main__":
     BYBIT_API_SECRET = require_env("BYBIT_API_SECRET")
     BINANCE_API_KEY = require_env("BINANCE_API_KEY")
     BINANCE_API_SECRET = require_env("BINANCE_API_SECRET")
+
+    OKX_API_KEY = require_env("OKX_API_KEY")
+    OKX_API_SECRET = require_env("OKX_API_SECRET")
+    OKX_PASSPHRASE = require_env("OKX_PASSPHRASE")
+
+    # Optional OKX instrument configuration (defaults align with your example)
+    OKX_INST_TYPE = os.getenv("OKX_INST_TYPE", "SWAP").strip() or "SWAP"
+    OKX_INST_ID = os.getenv("OKX_INST_ID", "NIGHT-USDT-SWAP").strip() or "NIGHT-USDT-SWAP"
 
     # ---- BYBIT ----
     bybit_resp = bybit_get_positions(
@@ -250,11 +348,14 @@ if __name__ == "__main__":
     )
 
     bybit_list = bybit_resp.get("result", {}).get("list", [])
+    # Don’t assume list[0] is the one you want
+    bybit_pos = next((p for p in bybit_list if p.get("symbol") == "NIGHTUSDT"), None)
+
     bybit_cum_realised_pnl = None
     bybit_size = None
-    if bybit_list:
-        bybit_cum_realised_pnl = bybit_list[0].get("cumRealisedPnl")
-        bybit_size = bybit_list[0].get("size")
+    if bybit_pos:
+        bybit_cum_realised_pnl = bybit_pos.get("cumRealisedPnl")
+        bybit_size = bybit_pos.get("size")
 
     # ---- BINANCE ----
     income = binance_get_futures_income(
@@ -283,6 +384,24 @@ if __name__ == "__main__":
     binance_size = None
     if positions:
         binance_size = positions[0].get("positionAmt")
+
+    # ---- OKX ----
+    okx_resp = okx_get_positions(
+        api_key=OKX_API_KEY,
+        api_secret=OKX_API_SECRET,
+        passphrase=OKX_PASSPHRASE,
+        inst_type=OKX_INST_TYPE,
+        inst_id=OKX_INST_ID,
+    )
+
+    okx_pos = _pick_okx_position(okx_resp, OKX_INST_ID)
+    okx_deltaPA = None
+    okx_realizedPnl = None
+    okx_size = None  # OKX commonly uses "pos" as position size
+    if okx_pos:
+        okx_deltaPA = okx_pos.get("deltaPA")
+        okx_realizedPnl = okx_pos.get("realizedPnl")
+        okx_size = okx_pos.get("pos")
 
     # ---- BUILD DATAFRAME FOR SHEET (cefi pnl) ----
     now_ms = int(time.time() * 1000)
@@ -315,6 +434,27 @@ if __name__ == "__main__":
                 "symbol": "",
                 "metric": "positions_0_positionAmt",
                 "value": binance_size,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "okx",
+                "symbol": OKX_INST_ID,
+                "metric": "deltaPA",
+                "value": okx_deltaPA,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "okx",
+                "symbol": OKX_INST_ID,
+                "metric": "realizedPnl",
+                "value": okx_realizedPnl,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "okx",
+                "symbol": OKX_INST_ID,
+                "metric": "pos",
+                "value": okx_size,
             },
         ]
     )

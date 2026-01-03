@@ -336,8 +336,8 @@ if __name__ == "__main__":
     OKX_PASSPHRASE = require_env("OKX_PASSPHRASE")
 
     # Optional OKX instrument configuration (defaults align with your example)
-    OKX_INST_TYPE = os.getenv("OKX_INST_TYPE", "SWAP").strip() or "SWAP"
-    OKX_INST_ID = os.getenv("OKX_INST_ID", "NIGHT-USDT-SWAP").strip() or "NIGHT-USDT-SWAP"
+    OKX_INST_TYPE = "SWAP"
+    OKX_INST_ID = "NIGHT-USDT-SWAP"
 
     # ---- BYBIT ----
     bybit_resp = bybit_get_positions(

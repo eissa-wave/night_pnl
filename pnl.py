@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 
 import requests
+from requests.exceptions import RequestException
 import pandas as pd
 
 import gspread
@@ -322,18 +323,177 @@ def _pick_okx_position(resp: Dict[str, Any], inst_id: Optional[str]) -> Optional
 
 
 # =========================
+# RAPIDX / LiquidityTech (RapidX)
+# =========================
+RAPIDX_BASE_URL = "https://api.liquiditytech.com"
+
+
+def _ltp_timestamp() -> int:
+    return int(time.time())
+
+
+def _ltp_get_header(
+    api_key: str,
+    secret: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    if params is None:
+        params = {}
+
+    nonce = _ltp_timestamp()
+    message = "&".join([f"{k}={params[k]}" for k in sorted(params.keys())]) + f"&{nonce}"
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        message.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
+
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": "PythonClient/1.0.0",
+        "X-MBX-APIKEY": api_key,
+        "signature": signature,
+        "nonce": str(nonce),
+    }
+
+
+def _ltp_safe_get_with_retries(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    retries: int = 3,
+    delay: float = 2.0,
+    timeout: float = 20.0,
+) -> requests.Response:
+    last_err: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except RequestException as e:
+            last_err = e
+            print(f"[Attempt {attempt}/{retries}] RapidX request error: {e}")
+            if attempt < retries:
+                time.sleep(delay)
+    raise RuntimeError(f"Max retries exceeded for {url}") from last_err
+
+
+def _ltp_parse_millisecond_timestamp(ts: Any) -> str:
+    if ts is None or (isinstance(ts, float) and pd.isna(ts)):
+        return "N/A"
+    return datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def _ltp_fallback_position_row(symbol: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "sym": symbol,
+                "positionMargin": 0,
+                "positionMM": 0,
+                "positionQty": 0,
+                "unrealizedPNL": 0,
+                "avgPrice": 0,
+                "markPrice": 0,
+                "leverage": 0,
+                "maxLeverage": 0,
+                "fee": 0,
+                "fundingFee": 0,
+                "createAt": "N/A",
+                "liqPrice": 0,
+                "timestamp_in_utc": "N/A",
+                "current_actual_leverage": 0,
+                "distance_from_liquidation": 0,
+            }
+        ]
+    )
+
+
+def get_live_position_cr(
+    symbol: str = "OKX_PERP_NIGHT_USDT",
+    api_key: Optional[str] = None,
+    secret: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Fetch live positions and return a filtered DF for `symbol`.
+    If no open position exists, returns a 1-row fallback DF.
+    """
+    api_key = api_key or os.getenv("LTP_API_KEY")
+    secret = secret or os.getenv("LTP_API_SECRET")
+    if not api_key or not secret:
+        raise ValueError("Missing RapidX creds. Set env vars LTP_API_KEY / LTP_API_SECRET.")
+
+    url = f"{RAPIDX_BASE_URL}/api/v1/trading/position"
+    headers = _ltp_get_header(api_key, secret)
+
+    resp = _ltp_safe_get_with_retries(url, headers=headers)
+    payload = resp.json()
+
+    data = payload.get("data", [])
+    df = pd.DataFrame(data)
+    if df.empty:
+        return _ltp_fallback_position_row(symbol)
+
+    numeric_cols = ["markPrice", "liqPrice", "createAt", "positionMargin", "positionMM", "positionValue"]
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if "createAt" in df.columns:
+        df["timestamp_in_utc"] = df["createAt"].apply(_ltp_parse_millisecond_timestamp)
+
+    if "positionValue" in df.columns and "positionMargin" in df.columns:
+        df["current_actual_leverage"] = df["positionValue"] / df["positionMargin"]
+
+    if "liqPrice" in df.columns and "markPrice" in df.columns:
+        df["distance_from_liquidation"] = (df["liqPrice"] / df["markPrice"]) - 1
+
+    df = df.drop(
+        columns=["riskLevel", "tpslOrder", "updateAt", "positionId", "positionSide", "portfolioId"],
+        errors="ignore",
+    )
+
+    if "sym" not in df.columns:
+        return _ltp_fallback_position_row(symbol)
+
+    df_sym = df.loc[df["sym"] == symbol].reset_index(drop=True)
+
+    if df_sym.empty:
+        print("RapidX: No open position — returning fallback row")
+        return _ltp_fallback_position_row(symbol)
+
+    df_sym = df_sym.drop(columns=["unrealizedPNLRate"], errors="ignore")
+    print("RapidX: Open position found")
+    return df_sym
+
+
+def _as_float_or_none(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+# =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
     # Read exchange env vars at runtime (important for cron/sourcing)
     BYBIT_API_KEY = require_env("BYBIT_API_KEY")
     BYBIT_API_SECRET = require_env("BYBIT_API_SECRET")
+
     BINANCE_API_KEY = require_env("BINANCE_API_KEY")
     BINANCE_API_SECRET = require_env("BINANCE_API_SECRET")
 
     OKX_API_KEY = require_env("OKX_API_KEY")
     OKX_API_SECRET = require_env("OKX_API_SECRET")
     OKX_PASSPHRASE = require_env("OKX_PASSPHRASE")
+
+    # RapidX creds
+    LTP_API_KEY = require_env("LTP_API_KEY")
+    LTP_API_SECRET = require_env("LTP_API_SECRET")
 
     # Optional OKX instrument configuration (defaults align with your example)
     OKX_INST_TYPE = "SWAP"
@@ -366,11 +526,7 @@ if __name__ == "__main__":
         limit=1000,
     )
 
-    print(f"Rows: {len(income)}")
-    print(income[:2])
-
     total_income = sum(float(row["income"]) for row in income if "income" in row)
-    print("Total income (float):", total_income)
 
     account = binance_get_futures_account(
         api_key=BINANCE_API_KEY,
@@ -403,10 +559,37 @@ if __name__ == "__main__":
         okx_realizedPnl = okx_pos.get("realizedPnl")
         okx_size = okx_pos.get("pos")
 
+    # ---- RAPIDX ----
+    RAPIDX_SYMBOL = "OKX_PERP_NIGHT_USDT"
+    rapidx_df = get_live_position_cr(
+        symbol=RAPIDX_SYMBOL,
+        api_key=LTP_API_KEY,
+        secret=LTP_API_SECRET,
+    )
+
+    rapidx_funding_fee = None
+    rapidx_position_qty = None
+    rapidx_mark_price = None
+    rapidx_liq_price = None
+    rapidx_distance_from_liq = None
+    rapidx_current_leverage = None
+
+    if isinstance(rapidx_df, pd.DataFrame) and not rapidx_df.empty:
+        rapidx_funding_fee = _as_float_or_none(rapidx_df.loc[0, "fundingFee"]) if "fundingFee" in rapidx_df.columns else None
+        rapidx_position_qty = _as_float_or_none(rapidx_df.loc[0, "positionQty"]) if "positionQty" in rapidx_df.columns else None
+        rapidx_mark_price = _as_float_or_none(rapidx_df.loc[0, "markPrice"]) if "markPrice" in rapidx_df.columns else None
+        rapidx_liq_price = _as_float_or_none(rapidx_df.loc[0, "liqPrice"]) if "liqPrice" in rapidx_df.columns else None
+        rapidx_distance_from_liq = _as_float_or_none(rapidx_df.loc[0, "distance_from_liquidation"]) if "distance_from_liquidation" in rapidx_df.columns else None
+        rapidx_current_leverage = _as_float_or_none(rapidx_df.loc[0, "current_actual_leverage"]) if "current_actual_leverage" in rapidx_df.columns else None
+
+    print("RapidX fundingFee:", rapidx_funding_fee)
+    print("RapidX positionQty:", rapidx_position_qty)
+
     # ---- BUILD DATAFRAME FOR SHEET (cefi pnl) ----
     now_ms = int(time.time() * 1000)
     df = pd.DataFrame(
         [
+            # BYBIT
             {
                 "timestamp_ms": now_ms,
                 "exchange": "bybit",
@@ -421,6 +604,7 @@ if __name__ == "__main__":
                 "metric": "size",
                 "value": bybit_size,
             },
+            # BINANCE
             {
                 "timestamp_ms": now_ms,
                 "exchange": "binance",
@@ -435,6 +619,7 @@ if __name__ == "__main__":
                 "metric": "positions_0_positionAmt",
                 "value": binance_size,
             },
+            # OKX
             {
                 "timestamp_ms": now_ms,
                 "exchange": "okx",
@@ -455,6 +640,49 @@ if __name__ == "__main__":
                 "symbol": OKX_INST_ID,
                 "metric": "pos",
                 "value": okx_size,
+            },
+            # RAPIDX (rows)
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "rapidx",
+                "symbol": RAPIDX_SYMBOL,
+                "metric": "fundingFee",
+                "value": rapidx_funding_fee,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "rapidx",
+                "symbol": RAPIDX_SYMBOL,
+                "metric": "positionQty",
+                "value": rapidx_position_qty,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "rapidx",
+                "symbol": RAPIDX_SYMBOL,
+                "metric": "markPrice",
+                "value": rapidx_mark_price,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "rapidx",
+                "symbol": RAPIDX_SYMBOL,
+                "metric": "liqPrice",
+                "value": rapidx_liq_price,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "rapidx",
+                "symbol": RAPIDX_SYMBOL,
+                "metric": "distance_from_liquidation",
+                "value": rapidx_distance_from_liq,
+            },
+            {
+                "timestamp_ms": now_ms,
+                "exchange": "rapidx",
+                "symbol": RAPIDX_SYMBOL,
+                "metric": "current_actual_leverage",
+                "value": rapidx_current_leverage,
             },
         ]
     )

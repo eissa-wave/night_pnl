@@ -654,35 +654,7 @@ if __name__ == "__main__":
                 "exchange": "rapidx",
                 "symbol": RAPIDX_SYMBOL,
                 "metric": "positionQty",
-                "value": rapidx_position_qty,
-            },
-            {
-                "timestamp_ms": now_ms,
-                "exchange": "rapidx",
-                "symbol": RAPIDX_SYMBOL,
-                "metric": "markPrice",
-                "value": rapidx_mark_price,
-            },
-            {
-                "timestamp_ms": now_ms,
-                "exchange": "rapidx",
-                "symbol": RAPIDX_SYMBOL,
-                "metric": "liqPrice",
-                "value": rapidx_liq_price,
-            },
-            {
-                "timestamp_ms": now_ms,
-                "exchange": "rapidx",
-                "symbol": RAPIDX_SYMBOL,
-                "metric": "distance_from_liquidation",
-                "value": rapidx_distance_from_liq,
-            },
-            {
-                "timestamp_ms": now_ms,
-                "exchange": "rapidx",
-                "symbol": RAPIDX_SYMBOL,
-                "metric": "current_actual_leverage",
-                "value": rapidx_current_leverage,
+                "value": rapidx_position_qty * 100,
             },
         ]
     )

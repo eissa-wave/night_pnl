@@ -37,7 +37,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-
+BINANCE_SYMBOL = "NIGHTUSDT"
 # Google service account:
 # - Prefer GOOGLE_SERVICE_ACCOUNT_FILE (path to JSON file)
 # - Or provide GOOGLE_SERVICE_ACCOUNT_JSON (full JSON string) and we'll write a temp file
@@ -175,7 +175,7 @@ def _binance_signed_get(
 def binance_get_futures_income(
     api_key: str,
     api_secret: str,
-    symbol: Optional[str] = None,
+    symbol: Optional[str] = BINANCE_SYMBOL,
     income_type: Optional[str] = None,
     start_time_ms: Optional[int] = None,
     end_time_ms: Optional[int] = None,
@@ -537,6 +537,11 @@ if __name__ == "__main__":
     open_positions = [p for p in positions if float(p.get("positionAmt", "0") or "0") != 0]
     print(f"Open positions: {len(open_positions)}")
 
+    binance_pos = next(
+        (p for p in positions if p.get("symbol") == BINANCE_SYMBOL),
+        None,
+    )
+
     binance_size = None
     if positions:
         binance_size = positions[0].get("positionAmt")
@@ -608,14 +613,14 @@ if __name__ == "__main__":
             {
                 "timestamp_ms": now_ms,
                 "exchange": "binance",
-                "symbol": "",
+                "symbol": BINANCE_SYMBOL,
                 "metric": "total_income_funding_fees",
                 "value": total_income,
             },
             {
                 "timestamp_ms": now_ms,
                 "exchange": "binance",
-                "symbol": "",
+                "symbol": BINANCE_SYMBOL,
                 "metric": "positions_0_positionAmt",
                 "value": binance_size,
             },

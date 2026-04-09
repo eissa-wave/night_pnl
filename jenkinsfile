@@ -1,0 +1,50 @@
+pipeline {
+    agent any
+
+    triggers {
+        cron('H/15 * * * *')
+    }
+
+    environment {
+        SHEET_URL = credentials('sheet-url')
+        BYBIT_API_KEY = credentials('bybit-api-key')
+        BYBIT_API_SECRET = credentials('bybit-api-secret')
+        BINANCE_API_KEY = credentials('binance-api-key')
+        BINANCE_API_SECRET = credentials('binance-api-secret')
+        OKX_API_KEY = credentials('okx-api-key')
+        OKX_API_SECRET = credentials('okx-api-secret')
+        OKX_PASSPHRASE = credentials('okx-passphrase')
+        LTP_API_KEY = credentials('ltp-api-key')
+        LTP_API_SECRET = credentials('ltp-api-secret')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Set up Python') {
+            steps {
+                sh '''
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install --upgrade pip
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Run script') {
+            steps {
+                withCredentials([file(credentialsId: 'google-service-account-json', variable: 'GOOGLE_SERVICE_ACCOUNT_FILE')]) {
+                    sh '''
+                        . venv/bin/activate
+                        python your_script.py
+                    '''
+                }
+            }
+        }
+    }
+}

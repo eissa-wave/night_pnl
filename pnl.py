@@ -543,8 +543,8 @@ if __name__ == "__main__":
     )
 
     binance_size = None
-    if positions:
-        binance_size = positions[0].get("positionAmt")
+    if binance_pos:
+        binance_size = binance_pos.get("positionAmt")
 
     # ---- OKX ----
     okx_resp = okx_get_positions(
